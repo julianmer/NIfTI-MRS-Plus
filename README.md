@@ -1,5 +1,5 @@
 <div align="center">
-  <img src="https://raw.githubusercontent.com/julianmer/NIfTI-MRS-Plus/main/assets/logo.png" alt="NIfTI-MRS+ Logo" width="220"/>
+  <img src="https://raw.githubusercontent.com/julianmer/NIfTI-MRS-Plus/main/assets/logo.svg" alt="NIfTI-MRS+ Logo" width="200"/>
   <p><em>Efficient, backend-agnostic batching of NIfTI-MRS spectra</em></p>
 
   [![PyPI version](https://badge.fury.io/py/nifti-mrs-plus.svg)](https://badge.fury.io/py/nifti-mrs-plus)

@@ -6,8 +6,8 @@
 #                                                                                                  #
 # Created: 2026-06-27                                                                              #
 #                                                                                                  #
-# Purpose: Tests for batch-aware plotting utilities. Mirrors the nifti-mrs test_nifti_mrs_vis     #
-#          pattern: skip when fsl-mrs is absent, run when present.                                #
+# Purpose: Tests for batch-aware plotting utilities. Mirrors the nifti-mrs test_nifti_mrs_vis      #
+#          pattern: skip when fsl-mrs is absent, run when present.                                 #
 #                                                                                                  #
 ####################################################################################################
 

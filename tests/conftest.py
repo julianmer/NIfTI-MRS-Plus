@@ -6,8 +6,8 @@
 #                                                                                                  #
 # Created: 2026-06-27                                                                              #
 #                                                                                                  #
-# Purpose: Shared pytest fixtures for the nifti-mrs-plus test suite. Mirrors the fixture          #
-#          structure used in Augmentrum, adapted to import from nifti_mrs_plus directly.          #
+# Purpose: Shared pytest fixtures for the nifti-mrs-plus test suite. Mirrors the fixture           #
+#          structure used in Augmentrum, adapted to import from nifti_mrs_plus directly.           #
 #                                                                                                  #
 ####################################################################################################
 

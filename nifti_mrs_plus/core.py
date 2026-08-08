@@ -4,16 +4,19 @@
 #                                                                                                  #
 # Authors: J. P. Merkofer (j.p.merkofer@tue.nl)                                                    #
 #                                                                                                  #
-# Purpose: NIfTI-MRS+ wrapper for efficient multi-subject (batched) processing across backends.     #
+# Purpose: NIfTI-MRS+ wrapper for efficient multi-subject (batched) processing across backends.    #
 #                                                                                                  #
-#   Wraps a list of ``NIFTI_MRS`` objects into a single batched representation with a shared       #
+#   Wraps a list of "NIFTI_MRS" objects into a single batched representation with a shared         #
 #   header, lazy per-backend tensor caching, and intuitive indexing.  Supports NIFTI_LIST,         #
 #   NumPy, PyTorch, TensorFlow, JAX, and Keras backends so the same code seamlessly becomes        #
 #   whatever tensor type the surrounding pipeline needs.                                           #
 #                                                                                                  #
 ####################################################################################################
 
+import importlib.util
+
 import numpy as np
+from dataclasses import dataclass, replace
 from enum import Enum
 from typing import List, Dict, Any, Optional, Union
 from copy import deepcopy
@@ -21,30 +24,14 @@ import warnings
 
 from nifti_mrs_plus import __version__
 
-try:
-    import torch
-    TORCH_AVAILABLE = True
-except ImportError:
-    TORCH_AVAILABLE = False
-
-try:
-    import tensorflow as tf
-    TF_AVAILABLE = True
-except ImportError:
-    TF_AVAILABLE = False
-
-try:
-    import jax
-    import jax.numpy as jnp
-    JAX_AVAILABLE = True
-except ImportError:
-    JAX_AVAILABLE = False
-
-try:
-    import keras
-    KERAS_AVAILABLE = True
-except ImportError:
-    KERAS_AVAILABLE = False
+# Whether a framework is installed, answered without importing it. find_spec
+# locates a module but does not execute it, so importing this package costs
+# nothing even when torch, tensorflow, jax and keras are all present -- they are
+# imported only by the conversion that actually needs one.
+TORCH_AVAILABLE = importlib.util.find_spec("torch") is not None
+TF_AVAILABLE = importlib.util.find_spec("tensorflow") is not None
+JAX_AVAILABLE = importlib.util.find_spec("jax") is not None
+KERAS_AVAILABLE = importlib.util.find_spec("keras") is not None
 
 from nifti_mrs.nifti_mrs import NIFTI_MRS
 
@@ -64,6 +51,88 @@ class Backend(Enum):
     TENSORFLOW = "tensorflow"   # TensorFlow tensors
     JAX = "jax"                 # JAX arrays
     KERAS = "keras"             # Keras tensors (backed by TF/JAX)
+
+
+#**************************************************************************************************#
+#                                        Class DataState                                           #
+#**************************************************************************************************#
+#                                                                                                  #
+# Where the data currently is, and what was last done to it.                                       #
+#                                                                                                  #
+#**************************************************************************************************#
+@dataclass(frozen=True)
+class DataState:
+    """
+    Where the data currently is, and what was last done to it.
+
+    Separate from the processing provenance, and deliberately so: provenance is
+    a record that *grows* with every operation, which is why writing it is
+    skipped in volatile mode. This is a fixed handful of facts, replaced rather
+    than appended to, so it costs the same whether a pipeline has two steps or
+    two hundred, and can be kept even on the fast path.
+
+    A step reads it to work out what it is looking at. Which spectral and
+    spatial domain the data is in decides whether a transform is needed;
+    whether the data has been undersampled decides where noise may legitimately
+    be added.
+
+    Attributes:
+        spectral: "time" or "frequency" - the state of the spectral axis.
+        spatial: "image" or "kspace" - the state of the spatial axes. Kept
+            apart from *spectral* because the two transforms act on different
+            axes and commute, so the data can be in any combination of the two.
+        sampling: "full" or "undersampled".
+        last: Name of the operation that most recently touched the data.
+    """
+
+    spectral: str = 'time'
+    spatial: str = 'image'
+    sampling: str = 'full'
+    last: str = ''
+
+    def having(self, **changes) -> 'DataState':
+        """
+        A copy with *changes* applied, leaving this one untouched.
+
+        Args:
+            **changes: Any of the attributes above.
+
+        Returns:
+            The updated state.
+        """
+        return replace(self, **changes)
+
+
+#****************#
+#   provenance   #
+#****************#
+# NIfTI-MRS provenance records which software touched the data. This package is
+# usually a library inside someone else's pipeline, so crediting itself would
+# name the transport rather than the tool that did the work. Callers claim the
+# record with set_provenance(); the default is honest for standalone use.
+_PROVENANCE = {'program': 'nifti-mrs-plus', 'version': __version__}
+
+
+def set_provenance(program: str, version: str):
+    """Name the software that "ProcessingApplied" entries should credit.
+
+    Call once at import time from the application or library built on top of
+    this package::
+
+        import nifti_mrs_plus
+        nifti_mrs_plus.set_provenance('Augmentrum', augmentrum.__version__)
+
+    Args:
+        program: Software name written to the "Program" provenance field.
+        version: Version string written to the "Version" provenance field.
+    """
+    _PROVENANCE['program'] = program
+    _PROVENANCE['version'] = version
+
+
+def get_provenance() -> dict:
+    """Return the currently registered provenance "{'program', 'version'}"."""
+    return dict(_PROVENANCE)
 
 
 #**************************************************************************************************#
@@ -96,7 +165,8 @@ class NIfTI_MRS_Plus:
         nifti_list: Union[List[NIFTI_MRS], 'NIfTI_MRS_Plus'],
         backend: Optional[Backend] = None,
         volatile: bool = False,
-        metadata: Optional[Dict[str, Any]] = None
+        metadata: Optional[Dict[str, Any]] = None,
+        state: Optional[DataState] = None
     ):
         """
         Initialize the NIfTI_MRS_Plus object with data and header.
@@ -106,6 +176,9 @@ class NIfTI_MRS_Plus:
             backend: Desired backend for pipeline processing (default: NIFTI_LIST)
             volatile: If True, skip metadata updates for speed
             metadata: Optional metadata dictionary
+            state: Where the data is and what was last done to it. Carried from
+                whatever produced it; a fresh batch starts at the NIfTI-MRS
+                canonical form, time domain and image space.
         """
         self.volatile = volatile
 
@@ -178,6 +251,17 @@ class NIfTI_MRS_Plus:
         self._cached_tensor = None
         self._cache_backend = None  # Which backend the cached tensor is in (relevant due to conversions)
         self._cache_device = None   # Device info (for PyTorch)
+        # True when _cached_tensor holds newer values than nifti_list, i.e. it is
+        # the source of truth and nifti_list is stale until materialize() runs.
+        self._tensor_dirty = False
+        # Kept even when volatile: it is a fixed handful of facts replaced each
+        # step, not a record that grows, so it costs nothing to carry.
+        self._state = state if state is not None else DataState()
+
+        # Higher-dimension tags for the pending tensor, when they differ from
+        # what nifti_list holds. Absolute, not a delta, so they survive being
+        # handed from one processing step to the next.
+        self._pending_tags = ()
 
     def _init_metadata(self, original_data: List[NIFTI_MRS], metadata: Optional[Dict] = None):
         """Initialize metadata from original NIfTI-MRS objects or provided dict."""
@@ -216,6 +300,24 @@ class NIfTI_MRS_Plus:
             self.metadata_individual.append(individual_meta)
 
     @property
+    def state(self) -> DataState:
+        """Where the data is, and what was last done to it."""
+        return self._state
+
+    def set_state(self, state: DataState) -> 'NIfTI_MRS_Plus':
+        """
+        Record where the data now is.
+
+        Args:
+            state: The new state.
+
+        Returns:
+            "self", so calls can be chained.
+        """
+        self._state = state
+        return self
+
+    @property
     def backend(self) -> Backend:
         """Current backend setting."""
         return self._backend
@@ -228,12 +330,19 @@ class NIfTI_MRS_Plus:
     @property
     def dim_tags(self):
         """
-        Return dimension tags from the first subject.
-        All subjects are validated to have the same dim_tags during initialization.
+        Tags for the higher dimensions, as the data stands now.
+
+        All subjects are validated to carry the same tags at construction, so
+        the first speaks for the batch. Any dimension a pending tensor added is
+        included, because the tags describe the data rather than the objects
+        that are waiting to be rebuilt around it.
         """
-        if self.n_subjects > 0:
-            return self.nifti_list[0].dim_tags
-        return None
+        if self.n_subjects == 0:
+            return None
+
+        if self._pending_tags:
+            return list(self._pending_tags)
+        return list(self.nifti_list[0].dim_tags)
 
     @property
     def data(self):
@@ -276,8 +385,8 @@ class NIfTI_MRS_Plus:
                     # Format for NIfTI-MRS provenance compatibility
                     processing_entry = {
                         'Time': provenance['Timestamp'],
-                        'Program': 'nifti-mrs-plus',
-                        'Version': __version__,
+                        'Program': _PROVENANCE['program'],
+                        'Version': _PROVENANCE['version'],
                         'Method': operation,
                         'Details': str(details)
                     }
@@ -309,8 +418,8 @@ class NIfTI_MRS_Plus:
                             try:
                                 processing_entry = {
                                     'Time': provenance['Timestamp'],
-                                    'Program': 'nifti-mrs-plus',
-                                    'Version': __version__,
+                                    'Program': _PROVENANCE['program'],
+                                    'Version': _PROVENANCE['version'],
                                     'Method': operation,
                                     'Details': str(details)
                                 }
@@ -330,8 +439,72 @@ class NIfTI_MRS_Plus:
                                 # If header extension doesn't support modification, skip silently
                                 pass
 
+    def _ensure_individual(self) -> None:
+        """Grow metadata_individual to one entry per spectrum.
+
+        It is empty in volatile mode, and short whenever a caller passed a metadata
+        dictionary that did not cover every spectrum.
+        """
+        while len(self.metadata_individual) < len(self.nifti_list):
+            self.metadata_individual.append({})
+
+    def set_result(self, name: str, value: Any, index: Optional[int] = None):
+        """
+        Attach an analysis result: a fit, concentrations, a QC metric.
+
+        Kept apart from update_metadata, which records provenance and stringifies its
+        details. A result has to come back out as the object that went in, or nothing
+        downstream can compare it against anything. Results are stored even in volatile
+        mode, where provenance is skipped: dropping a fit is not a speed optimisation.
+
+        Args:
+            name: What produced it, e.g. 'fit' or 'op_rmbadaverages'.
+            value: The result itself. Any object; it is not serialised.
+            index: Which spectrum it belongs to. None stores it for the batch.
+        """
+        if index is None:
+            self.metadata_common.setdefault('results', {})[name] = value
+            return
+
+        self._ensure_individual()
+        self.metadata_individual[index].setdefault('results', {})[name] = value
+
+    def get_result(self, name: str, index: Optional[int] = None) -> Any:
+        """
+        Retrieve an attached result, or None if there is none by that name.
+
+        Args:
+            name: The name it was stored under.
+            index: Which spectrum to read. None reads the batch-level result.
+
+        Returns:
+            The result as it was stored.
+        """
+        if index is None:
+            return self.metadata_common.get('results', {}).get(name)
+
+        self._ensure_individual()
+        return self.metadata_individual[index].get('results', {}).get(name)
+
+    def results(self, index: Optional[int] = None) -> Dict[str, Any]:
+        """
+        Every result attached at this level.
+
+        Args:
+            index: Which spectrum to read. None reads the batch level.
+
+        Returns:
+            Dict[str, Any]: Results by name. Empty if none were attached.
+        """
+        if index is None:
+            return dict(self.metadata_common.get('results', {}))
+
+        self._ensure_individual()
+        return dict(self.metadata_individual[index].get('results', {}))
+
     def copy(self) -> 'NIfTI_MRS_Plus':
         """Create a deep copy."""
+        self.materialize()   # otherwise the copy is taken from stale values
         new_nifti_list = [nifti.copy() for nifti in self.nifti_list]
 
         return NIfTI_MRS_Plus(
@@ -339,7 +512,8 @@ class NIfTI_MRS_Plus:
             backend=self._backend,
             volatile=self.volatile,
             metadata={'common': deepcopy(self.metadata_common),
-                     'individual': deepcopy(self.metadata_individual)}
+                     'individual': deepcopy(self.metadata_individual)},
+            state=self._state
         )
 
     def numpy(self) -> np.ndarray:
@@ -351,12 +525,18 @@ class NIfTI_MRS_Plus:
             All subjects **must** have the same shape (same N_PTS and same
             extra dimensions).  If subjects have non-uniform shapes (e.g. after
             truncation to different lengths, or different numbers of coils/
-            averages), this will raise a clear ``ValueError``.  Use
-            ``Backend.NIFTI_LIST`` to process subjects individually in that case.
+            averages), this will raise a clear "ValueError".  Use
+            "Backend.NIFTI_LIST" to process subjects individually in that case.
         """
         # Check if we have a cached numpy array
         if self._cached_tensor is not None and self._cache_backend == Backend.NUMPY:
             return self._cached_tensor
+
+        # A pending tensor is newer than nifti_list, so restacking the list here
+        # would silently return stale values. Convert the tensor instead.
+        if self._tensor_dirty and self._cached_tensor is not None:
+            from nifti_mrs_plus import ops
+            return ops.to_numpy(self._cached_tensor)
 
         # Convert from nifti_list
         if len(self.nifti_list) == 0:
@@ -397,16 +577,188 @@ class NIfTI_MRS_Plus:
     def list(self) -> List[NIFTI_MRS]:
         """
         Return list of NIFTI_MRS objects.
+
+        Flushes any pending tensor first, so the objects returned always carry
+        current values. That flush detaches: see "materialize".
         """
+        self.materialize()
         return self.nifti_list
+
+    #**************************#
+    #   tensor-authoritative   #
+    #**************************#
+    def set_data(self, tensor, backend: Optional[Backend] = None, dim_tags=()):
+        """
+        Install *tensor* as the authoritative data, without writing to "nifti_list".
+
+        This is the counterpart to "get_data", and what lets a processing
+        pipeline preserve gradients: the tensor is kept exactly as handed over,
+        "nifti_list" is marked stale, and the NumPy round-trip is deferred until
+        something actually needs NIfTI objects.
+
+        A pipeline therefore costs one materialization at the end, rather than
+        one per step.
+
+        Only the batch axis is fixed. A tensor of a different shape, or even a
+        different rank, is accepted: the NIfTI objects are rebuilt to fit it at
+        materialization, so an operation that resizes or adds a dimension is no
+        less differentiable than one that does not.
+
+        Args:
+            tensor: Any backend tensor whose leading axis is the batch.
+            backend: Which backend *tensor* belongs to. Inferred from its type
+                when omitted.
+            dim_tags: Higher-dimension tags for *tensor*, as a full
+                "[dim_5, dim_6, dim_7]" list. Required when the rank grows,
+                since a rebuilt object cannot infer what a new axis is.
+
+        Returns:
+            "self", so calls can be chained.
+
+        Raises:
+            ValueError: If the leading axis does not match "n_subjects".
+        """
+        if backend is None:
+            backend = self._infer_backend(tensor)
+
+        n = tensor.shape[0] if hasattr(tensor, 'shape') and len(tensor.shape) else None
+        if n is not None and int(n) != self.n_subjects:
+            raise ValueError(
+                f"set_data: leading axis is {int(n)} but this batch holds "
+                f"{self.n_subjects} subjects. The batch axis must be preserved."
+            )
+
+        self._cached_tensor = tensor
+        self._cache_backend = backend
+        self._cache_device = getattr(tensor, 'device', None) if backend == Backend.PYTORCH else None
+        self._tensor_dirty = True
+        self._pending_tags = tuple(dim_tags or ())
+        return self
+
+    _warned_jax_precision = False
+
+    @classmethod
+    def _warn_jax_precision(cls, dtype):
+        """Warn once that JAX will silently halve the precision of 64-bit data."""
+        try:
+            import jax
+            if jax.config.jax_enable_x64:
+                return
+        except ImportError:
+            return
+
+        if cls._warned_jax_precision:
+            return
+        cls._warned_jax_precision = True
+        warnings.warn(
+            f"JAX will downcast {dtype} to its 32-bit counterpart because "
+            "jax_enable_x64 is off, so this batch carries less precision on JAX "
+            "than on NumPy or TensorFlow. Pass dtype='complex64' to get_data() to "
+            "make that explicit and consistent, or enable x64 with "
+            "jax.config.update('jax_enable_x64', True).",
+            RuntimeWarning,
+            stacklevel=3,
+        )
+
+    @staticmethod
+    def _infer_backend(tensor) -> Backend:
+        """Map a tensor to the Backend it belongs to, by module name."""
+        from nifti_mrs_plus import ops
+
+        if isinstance(tensor, np.ndarray):
+            return Backend.NUMPY
+        if ops.is_torch(tensor):
+            return Backend.PYTORCH
+        if ops.is_jax(tensor):
+            return Backend.JAX
+        if ops.is_tf(tensor):
+            return Backend.TENSORFLOW
+        raise TypeError(
+            f"set_data: cannot infer a backend for {type(tensor).__name__}. "
+            "Pass backend= explicitly."
+        )
+
+    def materialize(self):
+        """
+        Write any pending tensor back into "nifti_list".
+
+        This is the single point at which data leaves its framework and becomes
+        NumPy again, so it is also the single point at which an autograd graph
+        ends and a device tensor returns to the host. Everything needing real
+        "NIFTI_MRS" objects -- "list", "save_nifti",
+        "save_hdf5" -- goes through here.
+
+        A no-op when nothing is pending, so it is cheap to call defensively.
+
+        A sample whose shape no longer matches its object gets a rebuilt object,
+        because a NIFTI_MRS fixes its extent at construction. Deferring that to
+        here is what lets a resizing operation stay differentiable: the rebuild
+        happens once, at the end, rather than at every step that changed a shape.
+
+        Returns:
+            "self", so calls can be chained.
+        """
+        if not self._tensor_dirty or self._cached_tensor is None:
+            return self
+
+        from nifti_mrs_plus import ops
+
+        arr = ops.to_numpy(self._cached_tensor)
+        for i, nifti in enumerate(self.nifti_list):
+            if i >= arr.shape[0]:
+                break
+            if arr[i].shape == nifti[:].shape:
+                nifti[:] = arr[i]
+            else:
+                self.nifti_list[i] = self._rebuild(nifti, arr[i])
+
+        self._tensor_dirty = False
+        return self
+
+    def _rebuild(self, nifti: NIFTI_MRS, sample: np.ndarray) -> NIFTI_MRS:
+        """
+        A NIFTI_MRS holding *sample*, carrying *nifti*'s header across.
+
+        Args:
+            nifti: Object whose header and geometry to keep.
+            sample: Values for the new object, one subject's worth.
+
+        Returns:
+            The rebuilt object.
+        """
+        from nifti_mrs.create_nmrs import gen_nifti_mrs_hdr_ext
+
+        hdr_ext = nifti.hdr_ext.copy()
+
+        # Only dimensions the new sample actually has can carry a tag.
+        tags = list(self._pending_tags) if self._pending_tags else list(nifti.dim_tags)
+        for position in range(3):
+            wanted = tags[position] if position < max(0, sample.ndim - 4) else None
+            hdr_ext.set_dim_info(position, wanted)
+
+        try:
+            affine = nifti.getAffine('voxel', 'world')
+        except Exception:
+            affine = None
+
+        rebuilt = gen_nifti_mrs_hdr_ext(sample, nifti.dwelltime, hdr_ext, affine=affine)
+
+        # Callers subclass NIFTI_MRS to add their own methods -- FSL-MRS is one --
+        # and the rebuilt object stands in for the original everywhere the
+        # original went, so it has to be the same kind of thing.
+        if type(rebuilt) is not type(nifti):
+            rebuilt = type(nifti)(rebuilt)
+        return rebuilt
 
     def _invalidate_cache(self):
         """Invalidate the cached tensor (called when data is modified)."""
         self._cached_tensor = None
         self._cache_backend = None
         self._cache_device = None
+        self._tensor_dirty = False
+        self._pending_tags = ()
 
-    def get_data(self, backend: Optional[Backend] = None):
+    def get_data(self, backend: Optional[Backend] = None, dtype=None):
         """
         Get data in the specified backend format.
 
@@ -415,6 +767,12 @@ class NIfTI_MRS_Plus:
 
         Args:
             backend: Desired backend (uses instance backend if None)
+            dtype: NumPy dtype to cast to before conversion, e.g. "'complex64'".
+                Defaults to "None", which preserves whatever the NIfTI data
+                holds. Pass it explicitly to pin precision across backends --
+                JAX downcasts 64-bit types unless "jax_enable_x64" is set,
+                so the same file otherwise yields complex64 on JAX and
+                complex128 on NumPy and TensorFlow.
 
         Returns:
             Data in requested format (list of NIFTI_MRS, numpy array, or tensor)
@@ -422,59 +780,66 @@ class NIfTI_MRS_Plus:
         target = backend or self._backend
 
         if target == Backend.NIFTI_LIST:
+            self.materialize()
             return self.nifti_list
 
         # Check if we already have cached tensor in target backend
-        if self._cached_tensor is not None and self._cache_backend == target:
+        if dtype is None and self._cached_tensor is not None and self._cache_backend == target:
             return self._cached_tensor
 
         # Get numpy array as intermediate (cached)
         array = self.numpy()
 
-        # Convert to target backend
+        if dtype is not None:
+            array = array.astype(dtype)
+        elif target == Backend.JAX and array.dtype.itemsize > 8:
+            self._warn_jax_precision(array.dtype)
+
         if target == Backend.NUMPY:
             return array  # Already cached by numpy()
 
-        elif target == Backend.PYTORCH:
+        tensor = self._convert(array, target)
+
+        # An explicitly requested dtype is a one-off view. Caching it would make
+        # a later default call return that dtype instead of the stored one.
+        if dtype is None:
+            self._cached_tensor = tensor
+            self._cache_backend = target
+            self._cache_device = 'cpu' if target == Backend.PYTORCH else None
+
+        return tensor
+
+    @staticmethod
+    def _convert(array: np.ndarray, target: Backend):
+        """Convert a NumPy array to *target*'s tensor type, without caching."""
+        if target == Backend.PYTORCH:
             if not TORCH_AVAILABLE:
                 raise ImportError("PyTorch not available")
-            tensor = torch.from_numpy(array)
-            # Cache it (on CPU for now, use .to() for GPU)
-            self._cached_tensor = tensor
-            self._cache_backend = Backend.PYTORCH
-            self._cache_device = 'cpu'
-            return tensor
+            import torch
+            # torch.from_numpy shares memory with `array`, which is this object's
+            # cached NumPy view. An in-place torch op would then mutate the cache
+            # behind its own back, so take a copy.
+            return torch.from_numpy(array.copy())
 
-        elif target == Backend.TENSORFLOW:
+        if target == Backend.TENSORFLOW:
             if not TF_AVAILABLE:
                 raise ImportError("TensorFlow not available")
-            tensor = tf.convert_to_tensor(array)
-            self._cached_tensor = tensor
-            self._cache_backend = Backend.TENSORFLOW
-            self._cache_device = None  # TF handles devices internally
-            return tensor
+            import tensorflow as tf
+            return tf.convert_to_tensor(array)
 
-        elif target == Backend.JAX:
+        if target == Backend.JAX:
             if not JAX_AVAILABLE:
                 raise ImportError("JAX not available")
-            tensor = jnp.array(array)
-            self._cached_tensor = tensor
-            self._cache_backend = Backend.JAX
-            self._cache_device = None  # JAX handles devices internally
-            return tensor
+            import jax.numpy as jnp
+            return jnp.array(array)
 
-        elif target == Backend.KERAS:
+        if target == Backend.KERAS:
             if not KERAS_AVAILABLE:
                 raise ImportError("Keras not available")
-            import keras.ops as ops
-            tensor = ops.convert_to_tensor(array)
-            self._cached_tensor = tensor
-            self._cache_backend = Backend.KERAS
-            self._cache_device = None
-            return tensor
+            import keras.ops as keras_ops
+            return keras_ops.convert_to_tensor(array)
 
-        else:
-            raise ValueError(f"Unknown backend: {target}")
+        raise ValueError(f"Unknown backend: {target}")
 
     def to(self, device: str) -> 'NIfTI_MRS_Plus':
         """
@@ -507,7 +872,8 @@ class NIfTI_MRS_Plus:
             nifti_list=self.nifti_list,  # Reuse same nifti objects
             backend=Backend.PYTORCH,
             volatile=self.volatile,
-            metadata={'common': self.metadata_common, 'individual': self.metadata_individual}
+            metadata={'common': self.metadata_common, 'individual': self.metadata_individual},
+            state=self._state
         )
 
         # Set the unified cache with GPU tensor
@@ -519,6 +885,7 @@ class NIfTI_MRS_Plus:
 
     def to_nifti_list(self) -> List[NIFTI_MRS]:
         """Return the internal list of NIfTI-MRS objects."""
+        self.materialize()
         return self.nifti_list
 
     # Proxy methods that delegate to first NIFTI_MRS (all have same structure)
@@ -626,6 +993,10 @@ class NIfTI_MRS_Plus:
             >>> nifti_plus[0]  # Returns NIFTI_MRS object for first subject
             >>> nifti_plus[0:5]  # Returns NIfTI_MRS_Plus with subjects 0-4
         """
+        # Hands out real NIFTI_MRS objects, so a pending tensor has to land
+        # first or the caller reads stale values.
+        self.materialize()
+
         if isinstance(idx, int):
             # Single index - return the NIFTI_MRS object directly
             return self.nifti_list[idx]
@@ -638,7 +1009,8 @@ class NIfTI_MRS_Plus:
                 nifti_list=new_nifti_list,
                 backend=self._backend,
                 volatile=self.volatile,
-                metadata={'common': self.metadata_common, 'individual': new_individual}
+                metadata={'common': self.metadata_common, 'individual': new_individual},
+                state=self._state
             )
 
     def __setitem__(self, idx, values):
@@ -691,17 +1063,25 @@ class NIfTI_MRS_Plus:
             # Setting in array/tensor backends
             # Need to update both the cached array and the underlying NIFTI objects
 
-            # Convert values to numpy if needed
-            if TORCH_AVAILABLE and isinstance(values, torch.Tensor):
-                values_np = values.numpy()
-            elif TF_AVAILABLE and isinstance(values, tf.Tensor):
-                values_np = values.numpy()
-            elif JAX_AVAILABLE and isinstance(values, jnp.ndarray):
-                values_np = np.asarray(values)
-            elif isinstance(values, np.ndarray):
-                values_np = values
-            else:
-                values_np = np.asarray(values)
+            from nifti_mrs_plus import ops
+
+            # Whole-batch assignment is the pipeline's hot path, and demoting it
+            # to NumPy here would sever an autograd graph and pull a device
+            # tensor back to the host. Hand it to set_data instead, which keeps
+            # the tensor as-is and defers the round-trip to materialize().
+            if isinstance(idx, slice) and idx == slice(None) and not isinstance(values, list):
+                try:
+                    self.set_data(values)
+                except TypeError:
+                    pass          # not a recognized tensor; fall through to NumPy
+                else:
+                    return
+
+            # Partial assignment still goes through NumPy: writing into a slice
+            # of a NIfTI array cannot preserve a graph. to_numpy detaches
+            # explicitly, rather than raising the way .numpy() does on a
+            # grad-enabled or non-CPU tensor.
+            values_np = ops.to_numpy(values) if not isinstance(values, np.ndarray) else values
 
             # Update cached tensor if it exists
             if self._cached_tensor is not None:
@@ -913,6 +1293,8 @@ class NIfTI_MRS_Plus:
         """
         from pathlib import Path
 
+        self.materialize()   # a pending tensor would otherwise not reach disk
+
         output_path = Path(output_dir)
         output_path.mkdir(parents=True, exist_ok=True)
 
@@ -964,6 +1346,11 @@ class NIfTI_MRS_Plus:
             f.attrs['backend'] = self._backend.value
             f.attrs['volatile'] = self.volatile
             f.attrs['nifti_mrs_plus_version'] = __version__
+            # Who wrote this file, per set_provenance(). Recorded generically so
+            # a reader can identify the producing tool without this package
+            # having to know the names of its downstream users.
+            f.attrs['program'] = _PROVENANCE['program']
+            f.attrs['program_version'] = _PROVENANCE['version']
 
             # Store batched data
             batched_data = self.numpy()
@@ -1015,9 +1402,18 @@ class NIfTI_MRS_Plus:
                 if hasattr(nifti_obj, 'spectrometer_frequency'):
                     subject_header_grp.attrs['spectrometer_frequency'] = json.dumps(list(nifti_obj.spectrometer_frequency))
 
-                # Note: Hdr_Ext object is complex and not easily JSON-serializable
-                # For full metadata preservation, use save_nifti() instead.
-                # HDF5 is primarily for efficient numpy/tensor storage.
+                # The NIfTI-MRS header extension *is* JSON by specification, and
+                # upstream Hdr_Ext round-trips through it. Storing it is what
+                # makes load_hdf5 able to rebuild real NIFTI_MRS objects.
+                try:
+                    subject_header_grp.attrs['hdr_ext'] = nifti_obj.hdr_ext.to_json()
+                except Exception:
+                    pass
+                try:
+                    affine = nifti_obj.getAffine('voxel', 'world')
+                    subject_header_grp.attrs['affine'] = json.dumps(np.asarray(affine).tolist())
+                except Exception:
+                    pass
 
     @classmethod
     def load_hdf5(cls, filepath: str, backend: Optional[Backend] = None) -> 'NIfTI_MRS_Plus':
@@ -1040,19 +1436,20 @@ class NIfTI_MRS_Plus:
             raise ImportError("h5py is required for HDF5 loading. Install with: pip install h5py")
 
         import json
-        from nifti_mrs.nifti_mrs import NIFTI_MRS  # noqa: F401
+        from nifti_mrs.create_nmrs import gen_nifti_mrs_hdr_ext
+        from nifti_mrs.hdr_ext import Hdr_Ext
 
         with h5py.File(filepath, 'r') as f:
             # Load metadata
             n_subjects = f.attrs['n_subjects']
-            saved_backend = Backend[f.attrs['backend'].upper()]  # noqa: F841
-            volatile = f.attrs.get('volatile', False)  # noqa: F841
+            saved_backend = Backend[f.attrs['backend'].upper()]
+            volatile = bool(f.attrs.get('volatile', False))
 
             # Load data
-            batched_data = f['data'][:]  # noqa: F841
+            batched_data = f['data'][:]
 
             # Load common metadata
-            metadata_common = {}  # noqa: F841
+            metadata_common = {}
             if 'metadata_common' in f:
                 for key, value in f['metadata_common'].attrs.items():
                     try:
@@ -1061,7 +1458,7 @@ class NIfTI_MRS_Plus:
                         metadata_common[key] = value
 
             # Load individual metadata
-            metadata_individual = []  # noqa: F841
+            metadata_individual = []
             if 'metadata_individual' in f:
                 for i in range(n_subjects):
                     subject_key = f'subject_{i:04d}'
@@ -1076,10 +1473,40 @@ class NIfTI_MRS_Plus:
                     else:
                         metadata_individual.append({})
 
-            # Note: This is a limitation - we can't fully reconstruct NIFTI_MRS without headers.
-            raise NotImplementedError(
-                "Full HDF5 loading with NIFTI_MRS reconstruction is not yet implemented. "
-                "The HDF5 file preserves all data and metadata, but reconstructing NIFTI_MRS "
-                "objects requires additional header information. "
-                "Use save_nifti() for full NIFTI-MRS compatibility, or use HDF5 for numpy/tensor workflows."
+            # Rebuild one NIFTI_MRS per subject from the stored header extension.
+            if 'nifti_headers' not in f:
+                raise ValueError(
+                    f"{filepath} has no 'nifti_headers' group, so NIFTI_MRS objects cannot "
+                    "be rebuilt. It was written by a version of nifti-mrs-plus that did not "
+                    "store the header extension; re-save it with the current version."
+                )
+
+            nifti_list = []
+            for i in range(int(n_subjects)):
+                grp = f['nifti_headers'][f'subject_{i:04d}']
+
+                if 'hdr_ext' not in grp.attrs:
+                    raise ValueError(
+                        f"{filepath}: subject {i} has no stored header extension. "
+                        "Re-save with the current version of nifti-mrs-plus."
+                    )
+
+                hdr_ext = Hdr_Ext.from_header_ext(json.loads(grp.attrs['hdr_ext']))
+                affine = (np.array(json.loads(grp.attrs['affine']))
+                          if 'affine' in grp.attrs else None)
+
+                nifti_list.append(
+                    gen_nifti_mrs_hdr_ext(
+                        batched_data[i],
+                        float(grp.attrs['dwelltime']),
+                        hdr_ext,
+                        affine=affine,
+                    )
+                )
+
+            return cls(
+                nifti_list=nifti_list,
+                backend=backend or saved_backend,
+                volatile=volatile,
+                metadata={'common': metadata_common, 'individual': metadata_individual},
             )

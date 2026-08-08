@@ -6,7 +6,7 @@
 #                                                                                                  #
 # Created: 2025-02-13                                                                              #
 #                                                                                                  #
-# Purpose: Batch-aware plotting utilities for NIfTI_MRS_Plus objects.                               #
+# Purpose: Batch-aware plotting utilities for NIfTI_MRS_Plus objects.                              #
 #          Implements spectrum / grid / comparison plots following NIfTI-MRS conventions.          #
 #          Coil combination and spectrum extraction use fsl-mrs, exactly as the reference          #
 #          nifti-mrs visualisation does (fsl-mrs required for plotting).                           #
@@ -122,13 +122,13 @@ def plot_spec_and_fit(spec, fit, true=None, ppmAxis=None, ppmLim=None, name='',
                       save_path=None, real=True, clean=False):
     """Plot a measured spectrum, the model fit, and the residual on a ppm axis.
 
-    Visual style: Data (black) / Fit (red, alpha=0.6) / Residual offset above (dimgrey) /
+    Visual style: Data (black) / Fit (red, alpha=0.6) / Residual offset above (dimgray) /
     optional True spectrum (green dashed). ppm-axis inverted, y-axis hidden.
 
     Parameters
     ----------
     spec      : np.ndarray (complex)  measured spectrum (1-D).
-    fit       : np.ndarray (complex)  forward-modelled fit (1-D).
+    fit       : np.ndarray (complex)  forward-modeled fit (1-D).
     true      : np.ndarray (complex), optional  ground-truth spectrum.
     ppmAxis   : np.ndarray, optional  chemical-shift axis matching spec. Defaults to
                 linspace(0.5, 4.0, len(spec)).
@@ -159,7 +159,7 @@ def plot_spec_and_fit(spec, fit, true=None, ppmAxis=None, ppmLim=None, name='',
     fig, ax = plt.subplots(figsize=(4, 3.5))
     ax.plot(ppmAxis, spec,     'k',       label='Data',     linewidth=1)
     ax.plot(ppmAxis, fit,      'r',       label='Fit',      alpha=0.6, linewidth=2)
-    ax.plot(ppmAxis, residual, 'dimgrey', label='Residual', alpha=0.8, linewidth=1)
+    ax.plot(ppmAxis, residual, 'dimgray', label='Residual', alpha=0.8, linewidth=1)
     if true is not None:
         true = _pick_part(true, real)
         ax.plot(ppmAxis, true, 'g', label='True Spectrum',
@@ -187,7 +187,7 @@ def plot_spec(spec, ppmAxis=None, ppmLim=None, name='', save_path=None,
     name      : str  filename stem (without extension).
     save_path : str, optional  directory to save PNG into; created if missing.
     real      : bool  if True plot real part, else imaginary.
-    color     : str  matplotlib colour string for the spectrum line.
+    color     : str  matplotlib color string for the spectrum line.
     title     : str, optional  axes title (small font, publication-friendly).
     clean     : bool  if True hide all axes/labels (publication snippet style).
     """

@@ -37,6 +37,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# Backend-agnostic op namespace (nifti_mrs_plus.ops). Keras 3 needs a framework
+# behind it -- install one of the extras below alongside this one.
+ops = ["keras>=3.0.0"]
 torch = ["torch>=1.10.0"]
 jax = ["jax>=0.4.0", "jaxlib>=0.4.0"]
 tensorflow = ["tensorflow>=2.8.0"]

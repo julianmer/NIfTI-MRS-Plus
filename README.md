@@ -47,14 +47,14 @@ batch[0:4]                           # NIfTI_MRS_Plus  (sub-batch)
 
 ## Backends
 
-| Extra | `Backend` | Returns |
+| Extra | Backend | Returns |
 |---|---|---|
 | *(none)* | `NIFTI_LIST` | `list[NIFTI_MRS]` |
 | *(none)* | `NUMPY` | `numpy.ndarray` |
 | `torch` | `PYTORCH` | `torch.Tensor` |
 | `jax` | `JAX` | `jax.Array` |
 | `tensorflow` | `TENSORFLOW` | `tf.Tensor` |
-| `keras` | `KERAS` | Keras tensor |
+| `keras` | `KERAS` | `KerasTensor` |
 
 ---
 

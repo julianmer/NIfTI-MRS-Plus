@@ -1,20 +1,20 @@
 ####################################################################################################
-#                                       test_backends.py                                           #
+#                                          test_ops.py                                             #
 ####################################################################################################
 #                                                                                                  #
 # Authors: J. P. Merkofer (j.p.merkofer@tue.nl)                                                    #
 #                                                                                                  #
 # Created: 2026-06-27                                                                              #
 #                                                                                                  #
-# Purpose: Tests for the nifti_mrs_plus.backends helper module — fft/ifft/fftshift,               #
-#          to_numpy, and match_backend, covering all available array backends.                    #
+# Purpose: Tests for the nifti_mrs_plus.ops module — fft/ifft/fftshift, to_numpy, and              #
+#          match_backend, covering all available array backends.                                   #
 #                                                                                                  #
 ####################################################################################################
 
 import pytest
 import numpy as np
 
-from nifti_mrs_plus.backends import fft, ifft, fftshift, ifftshift, to_numpy, match_backend
+from nifti_mrs_plus.ops import fft, ifft, fftshift, ifftshift, to_numpy, match_backend
 
 
 N = 128
@@ -140,3 +140,22 @@ class TestBackendsTensorflow:
         param = np.array([1.0, 2.0, 3.0, 4.0])
         out = match_backend(param, ref)
         assert isinstance(out, self.tf.Tensor)
+
+    @pytest.mark.parametrize("fn", [fft, ifft, fftshift, ifftshift])
+    def test_stays_a_tf_tensor(self, fn):
+        """TF input must not silently fall through to the numpy branch.
+
+        Before ops.py grew TensorFlow branches, every one of these dropped a TF
+        tensor into "np.fft.*", which coerces via "__array__" and discards
+        the graph. The roundtrip tests could not see it because they compare
+        through "to_numpy".
+        """
+        assert isinstance(fn(self._x()), self.tf.Tensor)
+
+    @pytest.mark.parametrize("n", [8, 9])
+    def test_shift_matches_numpy_for_odd_and_even(self, n):
+        """fftshift and ifftshift differ only for odd n -- pin both."""
+        x = _rng.random(n) + 1j * _rng.random(n)
+        xt = self.tf.constant(x.astype(np.complex64))
+        np.testing.assert_array_equal(to_numpy(fftshift(xt)), np.fft.fftshift(x).astype(np.complex64))
+        np.testing.assert_array_equal(to_numpy(ifftshift(xt)), np.fft.ifftshift(x).astype(np.complex64))

@@ -24,3 +24,6 @@ htmlcov/
 # Editors
 .vscode/
 .idea/
+
+# Vendored upstream reference copies, not ours to commit
+resources/

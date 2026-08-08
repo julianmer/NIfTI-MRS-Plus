@@ -262,53 +262,6 @@ class TestMetadata:
         assert nifti_plus.metadata_common == {}
 
 
-class TestResults:
-
-    def test_result_comes_back_as_the_object_that_went_in(self, nifti_mrs_plus):
-        """The distinction from update_metadata, which stringifies its details.
-
-        A result that comes back as "{'NAA': 12.3}" cannot be compared against
-        anything, which is the whole reason for storing it.
-        """
-        nifti_mrs_plus.set_result('fit', {'NAA': 12.3}, index=0)
-        got = nifti_mrs_plus.get_result('fit', index=0)
-
-        assert isinstance(got, dict), f"stored as {type(got).__name__}"
-        assert got == {'NAA': 12.3}
-
-    def test_results_are_per_spectrum(self, nifti_mrs_plus):
-        for i in range(len(nifti_mrs_plus)):
-            nifti_mrs_plus.set_result('snr', float(i), index=i)
-
-        assert [nifti_mrs_plus.get_result('snr', index=i)
-                for i in range(len(nifti_mrs_plus))] == [0.0, 1.0, 2.0, 3.0, 4.0]
-
-    def test_batch_and_per_spectrum_results_do_not_collide(self, nifti_mrs_plus):
-        nifti_mrs_plus.set_result('qc', 'batch')
-        nifti_mrs_plus.set_result('qc', 'first', index=0)
-
-        assert nifti_mrs_plus.get_result('qc') == 'batch'
-        assert nifti_mrs_plus.get_result('qc', index=0) == 'first'
-
-    def test_missing_result_is_none(self, nifti_mrs_plus):
-        assert nifti_mrs_plus.get_result('nothing') is None
-        assert nifti_mrs_plus.get_result('nothing', index=0) is None
-        assert nifti_mrs_plus.results(index=0) == {}
-
-    def test_results_survive_a_copy(self, nifti_mrs_plus):
-        """A pipeline copies as it goes, so a result that does not survive is lost."""
-        nifti_mrs_plus.set_result('fit', {'NAA': 12.3}, index=0)
-
-        assert nifti_mrs_plus.copy().get_result('fit', index=0) == {'NAA': 12.3}
-
-    def test_results_are_kept_in_volatile_mode(self, dummy_nifti_list):
-        """Volatile mode skips provenance for speed; dropping a fit is not speed."""
-        nifti_plus = NIfTI_MRS_Plus(nifti_list=dummy_nifti_list, volatile=True)
-        nifti_plus.set_result('fit', {'NAA': 12.3}, index=0)
-
-        assert nifti_plus.get_result('fit', index=0) == {'NAA': 12.3}
-
-
 class TestCopy:
 
     def test_copy(self, nifti_mrs_plus):

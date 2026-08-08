@@ -439,69 +439,6 @@ class NIfTI_MRS_Plus:
                                 # If header extension doesn't support modification, skip silently
                                 pass
 
-    def _ensure_individual(self) -> None:
-        """Grow metadata_individual to one entry per spectrum.
-
-        It is empty in volatile mode, and short whenever a caller passed a metadata
-        dictionary that did not cover every spectrum.
-        """
-        while len(self.metadata_individual) < len(self.nifti_list):
-            self.metadata_individual.append({})
-
-    def set_result(self, name: str, value: Any, index: Optional[int] = None):
-        """
-        Attach an analysis result: a fit, concentrations, a QC metric.
-
-        Kept apart from update_metadata, which records provenance and stringifies its
-        details. A result has to come back out as the object that went in, or nothing
-        downstream can compare it against anything. Results are stored even in volatile
-        mode, where provenance is skipped: dropping a fit is not a speed optimisation.
-
-        Args:
-            name: What produced it, e.g. 'fit' or 'op_rmbadaverages'.
-            value: The result itself. Any object; it is not serialised.
-            index: Which spectrum it belongs to. None stores it for the batch.
-        """
-        if index is None:
-            self.metadata_common.setdefault('results', {})[name] = value
-            return
-
-        self._ensure_individual()
-        self.metadata_individual[index].setdefault('results', {})[name] = value
-
-    def get_result(self, name: str, index: Optional[int] = None) -> Any:
-        """
-        Retrieve an attached result, or None if there is none by that name.
-
-        Args:
-            name: The name it was stored under.
-            index: Which spectrum to read. None reads the batch-level result.
-
-        Returns:
-            The result as it was stored.
-        """
-        if index is None:
-            return self.metadata_common.get('results', {}).get(name)
-
-        self._ensure_individual()
-        return self.metadata_individual[index].get('results', {}).get(name)
-
-    def results(self, index: Optional[int] = None) -> Dict[str, Any]:
-        """
-        Every result attached at this level.
-
-        Args:
-            index: Which spectrum to read. None reads the batch level.
-
-        Returns:
-            Dict[str, Any]: Results by name. Empty if none were attached.
-        """
-        if index is None:
-            return dict(self.metadata_common.get('results', {}))
-
-        self._ensure_individual()
-        return dict(self.metadata_individual[index].get('results', {}))
-
     def copy(self) -> 'NIfTI_MRS_Plus':
         """Create a deep copy."""
         self.materialize()   # otherwise the copy is taken from stale values

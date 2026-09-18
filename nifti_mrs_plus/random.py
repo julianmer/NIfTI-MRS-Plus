@@ -20,7 +20,7 @@ import os
 
 import numpy as np
 
-from nifti_mrs_plus.ops import is_jax, is_tf, is_torch
+from nifti_mrs_plus.ops import is_jax, is_tf, is_torch, real_dtype_of
 
 __all__ = ["SeedGenerator"]
 
@@ -79,8 +79,12 @@ class SeedGenerator:
         # Mix so consecutive counters do not give correlated streams.
         return (self.seed * 6364136223846793005 + self._counter) & 0x7FFFFFFFFFFFFFFF
 
-    def normal(self, shape, like=None, dtype="float32"):
-        """Standard normal samples of *shape*, on *like*'s backend and device."""
+    def normal(self, shape, like=None, dtype=None):
+        """
+        Standard normal samples of *shape*, on *like*'s backend and device; *dtype* defaults to
+        the real dtype of *like*'s precision (float32 without one).
+        """
+        dtype = dtype or real_dtype_of(like)
         key = self._next()
 
         if like is not None and is_torch(like):
@@ -103,8 +107,9 @@ class SeedGenerator:
 
         return np.random.default_rng(key).standard_normal(tuple(shape)).astype(dtype)
 
-    def uniform(self, shape=(), like=None, low=0.0, high=1.0, dtype="float32"):
-        """Uniform samples in "[low, high)", on *like*'s backend and device."""
+    def uniform(self, shape=(), like=None, low=0.0, high=1.0, dtype=None):
+        """Uniform samples in "[low, high)", on *like*'s backend and device; *dtype* as "normal"."""
+        dtype = dtype or real_dtype_of(like)
         key = self._next()
 
         if like is not None and is_torch(like):

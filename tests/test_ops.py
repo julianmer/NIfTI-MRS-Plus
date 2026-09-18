@@ -193,3 +193,16 @@ class TestPrecision:
     def test_an_explicit_dtype_still_wins(self):
         from nifti_mrs_plus.ops import arange_like
         assert arange_like(np.ones(2, np.complex128), 3, dtype="float32").dtype == np.float32
+
+
+class TestRandomPrecision:
+    """Random draws come in the precision of the data they are drawn for."""
+
+    @pytest.mark.parametrize("like, expected", [(np.ones(2, np.complex128), np.float64),
+                                                (np.ones(2, np.complex64), np.float32),
+                                                (None, np.float32)])
+    def test_draws_follow_like(self, like, expected):
+        from nifti_mrs_plus.random import SeedGenerator
+        rng = SeedGenerator(0)
+        assert rng.normal((3,), like=like).dtype == expected
+        assert rng.uniform((3,), like=like).dtype == expected

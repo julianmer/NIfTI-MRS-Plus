@@ -159,3 +159,37 @@ class TestBackendsTensorflow:
         xt = self.tf.constant(x.astype(np.complex64))
         np.testing.assert_array_equal(to_numpy(fftshift(xt)), np.fft.fftshift(x).astype(np.complex64))
         np.testing.assert_array_equal(to_numpy(ifftshift(xt)), np.fft.ifftshift(x).astype(np.complex64))
+
+
+# ── precision ─────────────────────────────────────────────────────────────────
+
+class TestPrecision:
+    """The ops keep the precision they are given, on NumPy as on every other backend."""
+
+    @pytest.mark.parametrize("dtype", [np.complex64, np.complex128])
+    @pytest.mark.parametrize("fn", [fft, ifft])
+    def test_numpy_transforms_keep_the_precision(self, fn, dtype):
+        """NumPy's own FFT returns complex128 for complex64 input; these must not."""
+        assert fn(X_NP.astype(dtype)).dtype == dtype
+
+    @pytest.mark.parametrize("dtype", [np.complex64, np.complex128])
+    def test_numpy_nd_transforms_keep_the_precision(self, dtype):
+        from nifti_mrs_plus.ops import fftn, ifftn
+        x = np.ones((4, 4), dtype)
+        assert fftn(x, axes=(0, 1)).dtype == dtype and ifftn(x, axes=(0, 1)).dtype == dtype
+
+    def test_single_precision_transform_matches_double(self):
+        np.testing.assert_allclose(fft(X_NP), np.fft.fft(X_NP.astype(np.complex128)), rtol=1e-5)
+
+    @pytest.mark.parametrize("ref, expected", [
+        (np.ones(2, np.complex128), np.float64), (np.ones(2, np.float64), np.float64),
+        (np.ones(2, np.complex64), np.float32), (np.arange(2), np.float32), (None, np.float32)])
+    def test_array_helpers_follow_the_reference_precision(self, ref, expected):
+        from nifti_mrs_plus.ops import arange_like, asarray_like, full_like_shape, linspace_like
+        for out in (arange_like(ref, 3), linspace_like(ref, 0.0, 1.0, 3),
+                    full_like_shape(ref, (2,), 0.5), asarray_like(ref, [1.0, 2.0])):
+            assert out.dtype == expected
+
+    def test_an_explicit_dtype_still_wins(self):
+        from nifti_mrs_plus.ops import arange_like
+        assert arange_like(np.ones(2, np.complex128), 3, dtype="float32").dtype == np.float32

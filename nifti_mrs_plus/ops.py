@@ -24,7 +24,7 @@ __all__ = [
     "fft", "ifft", "fftshift", "ifftshift",
     "to_numpy", "match_backend", "detach",
     "is_torch", "is_jax", "is_tf", "namespace",
-    "arange_like", "linspace_like", "full_like_shape", "asarray_like",
+    "real_dtype_of", "arange_like", "linspace_like", "full_like_shape", "asarray_like",
     "exp", "sqrt", "sin", "cos", "floor", "ceil", "abs", "where", "real",
     "complex_from", "imag", "is_complex", "transpose", "conj", "angle",
     "stack", "cast", "cast_bool", "shape", "clip", "take", "take_along",
@@ -80,13 +80,28 @@ def namespace(x):
 #******************#
 #   construction   #
 #******************#
-def arange_like(ref, n, dtype="float32"):
+def real_dtype_of(ref):
+    """
+    The real dtype name of *ref*'s precision: "float64" for double-precision data
+    (float64, complex128), "float32" for anything else, None included. What the
+    array helpers below create when no dtype is given, so an axis or envelope
+    built for the data is in the data's precision.
+    """
+    dtype = getattr(ref, "dtype", None)
+    name = getattr(dtype, "name", None)
+    name = name if isinstance(name, str) else str(dtype).rpartition(".")[2]
+    return "float64" if name in ("float64", "complex128") else "float32"
+
+
+def arange_like(ref, n, dtype=None):
     """"arange(n)" on the same backend, and for torch the same device, as *ref*.
 
     Creating an array needs a reference tensor rather than a global setting,
     because the result has to meet the data it will be combined with. A *ref* of
-    None means NumPy, for coordinates built before any tensor exists.
+    None means NumPy, for coordinates built before any tensor exists. *dtype*
+    defaults to the real dtype of *ref*'s precision ("real_dtype_of").
     """
+    dtype = dtype or real_dtype_of(ref)
     if is_torch(ref):
         import torch
         return torch.arange(n, dtype=getattr(torch, dtype), device=ref.device)
@@ -96,8 +111,9 @@ def arange_like(ref, n, dtype="float32"):
     return namespace(ref).arange(n, dtype=dtype)
 
 
-def linspace_like(ref, start, stop, num, endpoint=True, dtype="float32"):
-    """Evenly spaced values on *ref*'s backend, like "numpy.linspace"."""
+def linspace_like(ref, start, stop, num, endpoint=True, dtype=None):
+    """Evenly spaced values on *ref*'s backend, like "numpy.linspace"; *dtype* as "arange_like"."""
+    dtype = dtype or real_dtype_of(ref)
     num = int(num)
     if is_torch(ref):
         import torch
@@ -114,8 +130,9 @@ def linspace_like(ref, start, stop, num, endpoint=True, dtype="float32"):
     return namespace(ref).linspace(start, stop, num, endpoint=endpoint, dtype=dtype)
 
 
-def full_like_shape(ref, shape, fill_value, dtype="float32"):
-    """An array of *shape* filled with *fill_value*, on *ref*'s backend."""
+def full_like_shape(ref, shape, fill_value, dtype=None):
+    """An array of *shape* filled with *fill_value*, on *ref*'s backend; *dtype* as "arange_like"."""
+    dtype = dtype or real_dtype_of(ref)
     if is_torch(ref):
         import torch
         return torch.full(tuple(shape), fill_value,
@@ -126,8 +143,9 @@ def full_like_shape(ref, shape, fill_value, dtype="float32"):
     return namespace(ref).full(tuple(shape), fill_value, dtype=dtype)
 
 
-def asarray_like(ref, data, dtype="float32"):
-    """Convert *data* to an array on *ref*'s backend."""
+def asarray_like(ref, data, dtype=None):
+    """Convert *data* to an array on *ref*'s backend; *dtype* as "arange_like"."""
+    dtype = dtype or real_dtype_of(ref)
     if is_torch(ref):
         import torch
         if isinstance(data, torch.Tensor):
@@ -554,7 +572,7 @@ def _fftn(x, axes, norm, inverse):
         return _tf_fftn(x, axes, norm, inverse)
 
     fn = np.fft.ifftn if inverse else np.fft.fftn
-    return fn(x, axes=axes, norm=norm)
+    return _numpy_precision(fn(x, axes=axes, norm=norm), x)
 
 
 def _tf_fftn(x, axes, norm, inverse):
@@ -600,6 +618,15 @@ def _tf_fftn(x, axes, norm, inverse):
     return out
 
 
+def _numpy_precision(out, x):
+    """
+    A NumPy transform of *x* back in *x*'s precision. NumPy's FFT computes in
+    double whatever it is given (complex64 in, complex128 out); every other
+    backend keeps the precision of its input, and so does this one then.
+    """
+    return out.astype(np.result_type(np.asarray(x).dtype, np.complex64), copy=False)
+
+
 def fft(x):
     """Complex-to-complex FFT along the last axis (any backend).
 
@@ -620,7 +647,7 @@ def fft(x):
     if is_tf(x):
         import tensorflow as tf
         return tf.signal.fft(x)
-    return np.fft.fft(x)
+    return _numpy_precision(np.fft.fft(x), x)
 
 
 def ifft(x):
@@ -643,7 +670,7 @@ def ifft(x):
     if is_tf(x):
         import tensorflow as tf
         return tf.signal.ifft(x)
-    return np.fft.ifft(x)
+    return _numpy_precision(np.fft.ifft(x), x)
 
 
 #**************************#
